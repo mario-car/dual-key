@@ -2,8 +2,7 @@ remap_key=SPACE
 when_alone=SPACE
 with_other=RIGHT_CTRL
 
+hold_delay=70
 tap_timeout=500
 doublepress_timeout=500
-repeat_delay=500
-repeat_period=50
 debug=0

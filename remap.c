@@ -35,10 +35,9 @@ struct Remap
 // --------------------------------------
 
 int g_debug = 0;
+int g_hold_delay = 0;
 int g_tap_timeout = 0;
 int g_doublepress_timeout = 0;
-int g_repeat_delay = 500;
-int g_repeat_period = 50;
 struct Remap * g_remap_list;
 struct Remap * g_remap_parsee = NULL;
 
@@ -133,19 +132,6 @@ void send_key_def_input(KEY_DEF * key_def, enum Direction dir)
     send_input(key_def->scan_code, key_def->virt_code, dir);
 }
 
-HANDLE gDoneEvent;
-HANDLE hTimer = NULL;
-
-VOID CALLBACK TimerRoutine(PVOID lpParam, BOOLEAN TimerOrWaitFired)
-{
-    struct Remap * remap = lpParam;
-    if (remap->state == TAP) {
-        send_key_def_input(remap->to_when_alone, DOWN);
-    } else {
-        SetEvent(gDoneEvent);
-    }
-}
-
 /* @return swallow_input */
 int event_remapped_key_down(struct Remap * remap, DWORD time)
 {
@@ -153,30 +139,18 @@ int event_remapped_key_down(struct Remap * remap, DWORD time)
     if (remap->state == IDLE) {
         remap->time = time;
         remap->state = HELD_DOWN_ALONE;
+    } else if (remap->state == HELD_DOWN_WITH_OTHER) {
+        send_key_def_input(remap->to_with_other, DOWN);
     } else if (remap->state == TAPPED) {
         if ((g_doublepress_timeout > 0) && (time - remap->time < g_doublepress_timeout)) {
             remap->state = TAP;
-            send_key_def_input(remap->to_when_alone, DOWN);
-            if (g_repeat_period > 0) {
-                gDoneEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-                if (NULL == gDoneEvent) {
-                    printf("CreateEvent failed (%d)\n", GetLastError());
-                    return 1;
-                }
-                if (!CreateTimerQueueTimer(&hTimer, NULL, (WAITORTIMERCALLBACK)TimerRoutine,
-                                           remap, g_repeat_delay, g_repeat_period, 0)) {
-                    printf("CreateTimerQueueTimer failed (%d)\n", GetLastError());
-                    return 3;
-                }
-            }
+            return 0;
         } else {
             remap->time = time;
             remap->state = HELD_DOWN_ALONE;
         }
-        //    } else { /* recovery wrong case */
-        //        remap->state = TAP;
-        //        send_key_def_input(remap->to_with_other, UP);
-        //        send_key_def_input(remap->to_when_alone, DOWN);
+    } else if (remap->state == TAP) {
+        return 0;
     }
     return 1;
 }
@@ -185,10 +159,7 @@ int event_remapped_key_down(struct Remap * remap, DWORD time)
 int event_remapped_key_up(struct Remap * remap, DWORD time)
 {
     log_event("event_remapped_key_up");
-    if (remap->state == HELD_DOWN_WITH_OTHER) {
-        remap->state = IDLE;
-        send_key_def_input(remap->to_with_other, UP);
-    } else if (remap->state == HELD_DOWN_ALONE) {
+    if (remap->state == HELD_DOWN_ALONE) {
         if ((g_tap_timeout == 0) || (time - remap->time < g_tap_timeout)) {
             remap->time = time;
             remap->state = TAPPED;
@@ -197,32 +168,32 @@ int event_remapped_key_up(struct Remap * remap, DWORD time)
         } else {
             remap->state = IDLE;
         }
+    } else if (remap->state == HELD_DOWN_WITH_OTHER) {
+        remap->state = IDLE;
+        send_key_def_input(remap->to_with_other, UP);
     } else if (remap->state == TAP) {
         remap->time = time;
         remap->state = TAPPED;
-        if (hTimer) {
-            if (WaitForSingleObject(gDoneEvent, INFINITE) != WAIT_OBJECT_0)
-                printf("WaitForSingleObject failed (%d)\n", GetLastError());
-            CloseHandle(gDoneEvent);
-            if (!DeleteTimerQueueTimer(NULL, hTimer, NULL))
-                printf("DeleteTimerQueueTimer failed (%d)\n", GetLastError());
-        }
-        send_key_def_input(remap->to_when_alone, UP);
-        //    } else { /* recovery wrong case */
-        //        remap->state = IDLE;
-        //        send_key_def_input(remap->to_with_other, UP);
-        //        send_key_def_input(remap->to_when_alone, UP);
+        return 0;
     }
     return 1;
 }
 
 /* @return swallow_input */
-int event_other_input(DWORD time)
+int event_other_input(int virt_code, boolean key_up, DWORD time)
 {
     struct Remap * remap = g_remap_list;
     while(remap) {
-        if (remap->state == HELD_DOWN_ALONE || remap->state == HELD_DOWN_WITH_OTHER) {
-            remap->state = HELD_DOWN_WITH_OTHER;
+        if (remap->state == HELD_DOWN_ALONE) {
+            if (key_up || (time - remap->time < g_hold_delay)) {
+                remap->state = TAP;
+                send_key_def_input(remap->to_when_alone, DOWN);
+                return 0;
+            } else {
+                remap->state = HELD_DOWN_WITH_OTHER;
+                send_key_def_input(remap->to_with_other, DOWN);
+            }
+        } else if (remap->state == HELD_DOWN_WITH_OTHER) {
             send_key_def_input(remap->to_with_other, DOWN);
         }
         remap = remap->next;
@@ -244,7 +215,7 @@ int handle_input(int scan_code, int virt_code, int direction, DWORD time, DWORD 
           event_remapped_key_up(remap_for_input, time) :
           event_remapped_key_down(remap_for_input, time);
       } else {
-        return event_other_input(time);
+        return event_other_input(virt_code, LLKHF_UP & flags, time);
       }
     } else {
       return 0;
@@ -279,11 +250,12 @@ int load_config_line(char * line, int linenum)
 
     // Handle config declaration
     if (sscanf(line, "debug=%d", &g_debug)) {
-        if (g_debug == 1) {
+        if (g_debug == 1 || g_debug == 0)
             return 0;
-        } else {
-            g_debug = 0;
-        }
+    }
+
+    if (sscanf(line, "hold_delay=%d", &g_hold_delay)) {
+        return 0;
     }
 
     if (sscanf(line, "tap_timeout=%d", &g_tap_timeout)) {
@@ -291,14 +263,6 @@ int load_config_line(char * line, int linenum)
     }
 
     if (sscanf(line, "doublepress_timeout=%d", &g_doublepress_timeout)) {
-        return 0;
-    }
-
-    if (sscanf(line, "repeat_delay=%d", &g_repeat_delay)) {
-        return 0;
-    }
-
-    if (sscanf(line, "repeat_period=%d", &g_repeat_period)) {
         return 0;
     }
 
