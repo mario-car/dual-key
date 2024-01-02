@@ -207,18 +207,14 @@ int handle_input(int scan_code, int virt_code, int direction, DWORD time, DWORD 
 {
     int is_injected = dwExtraInfo == INJECTED_KEY_ID;
     if (!is_injected) log_input(scan_code, virt_code, direction, flags, dwExtraInfo);
-    struct Remap * remap_for_input = find_remap_for_virt_code(virt_code);
+    struct Remap * remap_for_input = is_injected ? NULL : find_remap_for_virt_code(virt_code);
 
-    if (!(LLKHF_INJECTED & flags)) {
-      if (remap_for_input) {
-        return (LLKHF_UP & flags) ?
-          event_remapped_key_up(remap_for_input, time) :
-          event_remapped_key_down(remap_for_input, time);
-      } else {
-        return event_other_input(virt_code, LLKHF_UP & flags, time);
-      }
+    if (remap_for_input) {
+      return (LLKHF_UP & flags) ?
+	event_remapped_key_up(remap_for_input, time) :
+	event_remapped_key_down(remap_for_input, time);
     } else {
-      return 0;
+      return event_other_input(virt_code, LLKHF_UP & flags, time);
     }
 }
 
@@ -321,3 +317,5 @@ void reset_config()
     }
     g_remap_list = NULL;
 }
+
+
